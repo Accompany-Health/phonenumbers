@@ -40,5 +40,6 @@ It will rebuild the following files:
  * `gen/prefix_to_timezone_bin.go` - information needed to map a phone number prefix to a city or region
 
 ```bash
-% go run ./cmd/buildmetadata
+% go install github.com/Accompany-Health/phonenumbers/cmd/buildmetadata
+% $GOPATH/bin/buildmetadata
 ```

@@ -1,4 +1,4 @@
-module github.com/nyaruka/phonenumbers
+module github.com/Accompany-Health/phonenumbers
 
 go 1.23.0
 
