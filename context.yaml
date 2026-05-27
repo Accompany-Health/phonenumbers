@@ -1,0 +1,47 @@
+name: "phonenumbers"
+type: library
+language:
+  - go
+owner:
+  team: "orion"
+  slack: "#eng-backend"
+  github: "@Accompany-Health/orion"
+tier: "tier2"
+lifecycle: production
+domain:
+  - shared
+  - utilities
+interfaces:
+  inbound: []
+  outbound: []
+runtime:
+  run_local: "N/A (library — no standalone process)"
+  test: "go test ./..."
+  build: "go build ./..."
+entrypoints:
+  - path: "phonenumbers.go"
+    purpose: "Core public API — Parse, Format, IsValidNumber, GetNumberType, etc."
+important_paths:
+  - path: "phonenumbers.go"
+    purpose: "Main library implementation (~2800 lines)"
+  - path: "gen/"
+    purpose: "Generated binary metadata blobs (territory formatting rules, carrier/geocoding/timezone maps)"
+  - path: "cmd/buildmetadata/"
+    purpose: "CLI tool to refresh metadata from upstream Google libphonenumber"
+  - path: "shortnumber_info.go"
+    purpose: "Short number (emergency/info service) validation"
+dependencies:
+  internal: []
+  infra: []
+  external:
+    - "nyaruka/phonenumbers (upstream Go fork this repo is based on — https://github.com/nyaruka/phonenumbers)"
+    - "google/libphonenumber (upstream metadata source — https://github.com/google/libphonenumber)"
+data_stores: []
+external_services: []
+docs:
+  readme: "./README.md"
+  architecture: "./docs/architecture.md"
+  local_dev: "./docs/local-development.md"
+  dependencies: "./docs/dependencies.md"
+  troubleshooting: "./docs/troubleshooting.md"
+  glossary: "./docs/glossary.md"
