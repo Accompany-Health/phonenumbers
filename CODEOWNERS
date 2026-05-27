@@ -1,0 +1,8 @@
+# Default owners for everything in the repo
+* @Accompany-Health/orion
+
+# Documentation
+/docs/ @Accompany-Health/orion
+
+# GitHub Actions / CI
+/.github/ @Accompany-Health/orion @Accompany-Health/platform
