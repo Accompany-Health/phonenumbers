@@ -1,3 +1,90 @@
+v1.7.5 (2026-05-25)
+-------------------------
+ * Update metadata
+
+v1.7.4 (2026-05-11)
+-------------------------
+ * Fix stale Ahmedabad geocoding test after upstream data update
+ * Updated metadata
+
+v1.7.3 (2026-05-11)
+-------------------------
+ * Update metadata
+
+v1.7.2 (2026-04-27)
+-------------------------
+ * Update metadata
+
+v1.7.1 (2026-04-01)
+-------------------------
+ * Fix four logic differences with upstream libphonenumber
+
+v1.7.0 (2026-03-31)
+-------------------------
+ * Fix behavioral differences with upstream libphonenumber
+
+v1.6.13 (2026-03-31)
+-------------------------
+ * Update metadata
+ * Change to use slices instead of exp/slices
+
+v1.6.12 (2026-03-17)
+-------------------------
+ * Update metadata
+
+v1.6.11 (2026-03-06)
+-------------------------
+ * Update metadata
+
+v1.6.10 (2026-02-18)
+-------------------------
+ * Update metadata
+
+v1.6.9 (2026-02-09)
+-------------------------
+ * Update metadata
+
+v1.6.8 (2026-01-08)
+-------------------------
+ * Update metadata
+
+v1.6.7 (2025-11-12)
+-------------------------
+ * Update metadata
+
+v1.6.6 (2025-10-10)
+-------------------------
+ * Merge pull request #211 from nyaruka/update_metadata
+ * Update test for DE format number size
+ * Update metadata
+
+v1.6.5 (2025-08-11)
+-------------------------
+ * Update metadata
+
+v1.6.4 (2025-07-22)
+-------------------------
+ * Update metadata
+
+v1.6.3 (2025-05-22)
+-------------------------
+ * Update metadata
+
+v1.6.2 (2025-05-22)
+-------------------------
+ * Update isNumberGeographical to consider GEO_MOBILE_COUNTRIES
+
+v1.6.1 (2025-04-23)
+-------------------------
+ * Update metadata
+
+v1.6.0 (2025-03-20)
+-------------------------
+ * Fix copying mutex in number desc
+ * Update dependencies
+ * Bump supported go versions
+ * Optimize package initialization
+
 v1.5.0 (2025-01-18)
 -------------------------
  * Add shortnumber emergency functions

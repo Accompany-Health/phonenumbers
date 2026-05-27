@@ -1,8 +1,10 @@
 package phonenumbers
 
 import (
+	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -10,11 +12,57 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/Accompany-Health/phonenumbers/gen"
 	"golang.org/x/text/language"
 	"golang.org/x/text/language/display"
 	"google.golang.org/protobuf/proto"
 )
+
+func init() {
+	initMetadata()
+}
+
+func initMetadata() {
+	// load our regions
+	regionMap, err := loadIntArrayMap(regionData)
+	if err != nil {
+		panic(err)
+	}
+	countryCodeToRegion = regionMap.Map
+
+	// then our metadata
+	if err = loadMetadataFromFile(); err != nil {
+		panic(err)
+	}
+
+	for eKey, regionCodes := range countryCodeToRegion {
+		// We can assume that if the county calling code maps to the
+		// non-geo entity region code then that's the only region code
+		// it maps to.
+		if len(regionCodes) == 1 && REGION_CODE_FOR_NON_GEO_ENTITY == regionCodes[0] {
+			// This is the subset of all country codes that map to the
+			// non-geo entity region code.
+			countryCodesForNonGeographicalRegion[eKey] = true
+		} else {
+			// The supported regions set does not include the "001"
+			// non-geo entity region code.
+			for _, val := range regionCodes {
+				supportedRegions[val] = true
+			}
+		}
+
+		supportedCallingCodes[eKey] = true
+	}
+	// If the non-geo entity still got added to the set of supported
+	// regions it must be because there are entries that list the non-geo
+	// entity alongside normal regions (which is wrong). If we discover
+	// this, remove the non-geo entity from the set of supported regions
+	// and log (or not log).
+	delete(supportedRegions, REGION_CODE_FOR_NON_GEO_ENTITY)
+
+	for _, val := range countryCodeToRegion[NANPA_COUNTRY_CODE] {
+		writeToNanpaRegions(val, struct{}{})
+	}
+}
 
 const (
 	// MIN_LENGTH_FOR_NSN is the minimum and maximum length of the national significant number.
@@ -33,10 +81,6 @@ const (
 	UNKNOWN_REGION = "ZZ"
 
 	NANPA_COUNTRY_CODE = 1
-
-	// The prefix that needs to be inserted in front of a Colombian
-	// landline number when dialed from a mobile phone in Colombia.
-	COLOMBIA_MOBILE_TO_FIXED_LINE_PREFIX = "3"
 
 	// The PLUS_SIGN signifies the international prefix.
 	PLUS_SIGN = '+'
@@ -76,7 +120,6 @@ var (
 	// the length of the national destination code, which should be the
 	// length of the area code plus the length of the mobile token.
 	MOBILE_TOKEN_MAPPINGS = map[int]string{
-		52: "1",
 		54: "9",
 	}
 
@@ -97,6 +140,7 @@ var (
 		'0':       '0',
 		PLUS_SIGN: PLUS_SIGN,
 		'*':       '*',
+		'#':       '#',
 	}
 
 	// Only upper-case variants of alpha characters are stored.
@@ -131,44 +175,42 @@ var (
 
 	// For performance reasons, amalgamate both into one map.
 	ALPHA_PHONE_MAPPINGS = map[rune]rune{
-		'1':       '1',
-		'2':       '2',
-		'3':       '3',
-		'4':       '4',
-		'5':       '5',
-		'6':       '6',
-		'7':       '7',
-		'8':       '8',
-		'9':       '9',
-		'0':       '0',
-		PLUS_SIGN: PLUS_SIGN,
-		'*':       '*',
-		'A':       '2',
-		'B':       '2',
-		'C':       '2',
-		'D':       '3',
-		'E':       '3',
-		'F':       '3',
-		'G':       '4',
-		'H':       '4',
-		'I':       '4',
-		'J':       '5',
-		'K':       '5',
-		'L':       '5',
-		'M':       '6',
-		'N':       '6',
-		'O':       '6',
-		'P':       '7',
-		'Q':       '7',
-		'R':       '7',
-		'S':       '7',
-		'T':       '8',
-		'U':       '8',
-		'V':       '8',
-		'W':       '9',
-		'X':       '9',
-		'Y':       '9',
-		'Z':       '9',
+		'0': '0',
+		'1': '1',
+		'2': '2',
+		'3': '3',
+		'4': '4',
+		'5': '5',
+		'6': '6',
+		'7': '7',
+		'8': '8',
+		'9': '9',
+		'A': '2',
+		'B': '2',
+		'C': '2',
+		'D': '3',
+		'E': '3',
+		'F': '3',
+		'G': '4',
+		'H': '4',
+		'I': '4',
+		'J': '5',
+		'K': '5',
+		'L': '5',
+		'M': '6',
+		'N': '6',
+		'O': '6',
+		'P': '7',
+		'Q': '7',
+		'R': '7',
+		'S': '7',
+		'T': '8',
+		'U': '8',
+		'V': '8',
+		'W': '9',
+		'X': '9',
+		'Y': '9',
+		'Z': '9',
 	}
 
 	// Separate map of all symbols that we wish to retain when formatting
@@ -338,45 +380,76 @@ var (
 	// overridden by region-specific preferences.
 	DEFAULT_EXTN_PREFIX = " ext. "
 
-	// Pattern to capture digits used in an extension. Places a maximum
-	// length of "7" for an extension.
-	CAPTURING_EXTN_DIGITS = "(" + DIGITS + "{1,7})"
+	// We cap the maximum length of an extension based on the ambiguity of
+	// the way the extension is prefixed. As per ITU, the officially allowed
+	// length for extensions is actually 40, but we don't support this since
+	// we haven't seen real examples and this introduces many false
+	// interpretations as the extension labels are not standardized.
+
+	possibleSeparatorsBetweenNumberAndExtLabel = "[ \u00A0\\t,]*"
+	// Optional full stop (.) or colon, followed by zero or more spaces/tabs/commas.
+	possibleCharsAfterExtLabel = "[:\\.\uFF0E]?[ \u00A0\\t,-]*"
+	optionalExtnSuffix         = "#?"
+
+	// Here the extension is called out in a more explicit way, i.e.
+	// mentioning it with obvious patterns like "ext.".
+	// Canonical-equivalence doesn't seem to be an option with Android
+	// java, so we allow two options for representing the accented o -
+	// the character itself, and one in the unicode decomposed form
+	// with the combining acute accent.
+	explicitExtLabels = "(?:e?xt(?:ensi(?:o\u0301?|\u00F3))?n?|" +
+		"\uFF45?\uFF58\uFF54\uFF4E?|\u0434\u043E\u0431|anexo)"
+	// One-character symbols that can be used to indicate an extension,
+	// and less commonly used or more ambiguous extension labels.
+	ambiguousExtLabels = "(?:[x\uFF58#\uFF03~\uFF5E]|int|\uFF49\uFF4E\uFF54)"
+	ambiguousSeparator = "[- ]+"
 
 	// Regexp of all possible ways to write extensions, for use when
 	// parsing. This will be run as a case-insensitive regexp match.
-	// Wide character versions are also provided after each ASCII version.
-	// There are three regular expressions here. The first covers RFC 3966
-	// format, where the extension is added using ";ext=". The second more
-	// generic one starts with optional white space and ends with an
-	// optional full stop (.), followed by zero or more spaces/tabs and then
-	// the numbers themselves. The other one covers the special case of
-	// American numbers where the extension is written with a hash at the
-	// end, such as "- 503#". Note that the only capturing groups should
-	// be around the digits that you want to capture as part of the
-	// extension, or else parsing will fail! Canonical-equivalence doesn't
-	// seem to be an option with Android java, so we allow two options
-	// for representing the accented o - the character itself, and one in
-	// the unicode decomposed form with the combining acute accent.
-	EXTN_PATTERNS_FOR_PARSING = RFC3966_EXTN_PREFIX + CAPTURING_EXTN_DIGITS + "|" + "[ \u00A0\\t,]*" +
-		"(?:e?xt(?:ensi(?:o\u0301?|\u00F3))?n?|\uFF45?\uFF58\uFF54\uFF4E?|" +
-		"[;,x\uFF58#\uFF03~\uFF5E]|int|anexo|\uFF49\uFF4E\uFF54)" +
-		"[:\\.\uFF0E]?[ \u00A0\\t,-]*" + CAPTURING_EXTN_DIGITS + "#?|" +
-		"[- ]+(" + DIGITS + "{1,5})#"
-	EXTN_PATTERNS_FOR_MATCHING = RFC3966_EXTN_PREFIX + CAPTURING_EXTN_DIGITS + "|" + "[ \u00A0\\t,]*" +
-		"(?:e?xt(?:ensi(?:o\u0301?|\u00F3))?n?|\uFF45?\uFF58\uFF54\uFF4E?|" +
-		"[x\uFF58#\uFF03~\uFF5E]|int|anexo|\uFF49\uFF4E\uFF54)" +
-		"[:\\.\uFF0E]?[ \u00A0\\t,-]*" + CAPTURING_EXTN_DIGITS + "#?|" +
-		"[- ]+(" + DIGITS + "{1,5})#"
+	// maybeStripExtension iterates over all submatches of this pattern
+	// and assumes that every capturing group corresponds to the
+	// extension digits. When modifying this regexp, ensure that any
+	// non-extension grouping uses non-capturing groups (?:...) so as
+	// not to introduce additional capturing groups that would break
+	// extension parsing.
+	//
+	// The first regular expression covers RFC 3966 format, where the
+	// extension is added using ";ext=". The second is a more generic
+	// expression where the extension is mentioned with explicit labels like "ext:". In both
+	// cases we allow more digits. The third captures when single
+	// character extension labels or less commonly used labels are used,
+	// with fewer extension digits to reduce false positives. The fourth
+	// covers American numbers where the extension is written with a
+	// hash at the end, such as "- 503#".
+	EXTN_PATTERNS_FOR_MATCHING = RFC3966_EXTN_PREFIX + "(" + DIGITS + "{1,20})" + "|" +
+		possibleSeparatorsBetweenNumberAndExtLabel + explicitExtLabels +
+		possibleCharsAfterExtLabel + "(" + DIGITS + "{1,20})" + optionalExtnSuffix + "|" +
+		possibleSeparatorsBetweenNumberAndExtLabel + ambiguousExtLabels +
+		possibleCharsAfterExtLabel + "(" + DIGITS + "{1,9})" + optionalExtnSuffix + "|" +
+		ambiguousSeparator + "(" + DIGITS + "{1,6})#"
+
+	// Additional patterns supported when parsing extensions, not when matching.
+	// ",," is commonly used for auto dialling the extension when connected.
+	// Semi-colon works on iPhone and Android to pop up a button with the
+	// extension number following.
+	possibleSeparatorsNumberExtLabelNoComma = "[ \u00A0\\t]*"
+	autoDiallingAndExtLabelsFound           = "(?:,{2}|;)"
+
+	EXTN_PATTERNS_FOR_PARSING = EXTN_PATTERNS_FOR_MATCHING + "|" +
+		possibleSeparatorsNumberExtLabelNoComma + autoDiallingAndExtLabelsFound +
+		possibleCharsAfterExtLabel + "(" + DIGITS + "{1,15})" + optionalExtnSuffix + "|" +
+		possibleSeparatorsNumberExtLabelNoComma + "(?:,)+" +
+		possibleCharsAfterExtLabel + "(" + DIGITS + "{1,9})" + optionalExtnSuffix
 
 	// Regexp of all known extension prefixes used by different regions
 	// followed by 1 or more valid digits, for use when parsing.
-	EXTN_PATTERN = regexp.MustCompile("(?:" + EXTN_PATTERNS_FOR_PARSING + ")$")
+	EXTN_PATTERN = regexp.MustCompile("(?i)(?:" + EXTN_PATTERNS_FOR_PARSING + ")$")
 
 	// We append optionally the extension pattern to the end here, as a
 	// valid phone number may have an extension prefix appended,
 	// followed by 1 or more digits.
 	VALID_PHONE_NUMBER_PATTERN = regexp.MustCompile(
-		"^(" + VALID_PHONE_NUMBER + "(?:" + EXTN_PATTERNS_FOR_PARSING + ")?)$")
+		"(?i)^(" + VALID_PHONE_NUMBER + "(?:" + EXTN_PATTERNS_FOR_PARSING + ")?)$")
 
 	NON_DIGITS_PATTERN = regexp.MustCompile(`(\D+)`)
 	DIGITS_PATTERN     = regexp.MustCompile(`(\d+)`)
@@ -395,7 +468,7 @@ var (
 	// formatting rule has the first group only, i.e., does not start
 	// with the national prefix. Note that the pattern explicitly allows
 	// for unbalanced parentheses.
-	FIRST_GROUP_ONLY_PREFIX_PATTERN = regexp.MustCompile(`\(?\$1\)?`)
+	FIRST_GROUP_ONLY_PREFIX_PATTERN = regexp.MustCompile(`^\(?\$1\)?$`)
 
 	REGION_CODE_FOR_NON_GEO_ENTITY = "001"
 
@@ -426,6 +499,21 @@ var (
 	COUNTRIES_WITHOUT_NATIONAL_PREFIX_WITH_AREA_CODES = map[int32]bool{
 		52: true, // Mexico
 	}
+
+	// Set of country calling codes that have geographically assigned mobile numbers. This may not be
+	// complete; we add calling codes case by case, as we find geographical mobile numbers or hear
+	// from user reports. Note that countries like the US, where we can't distinguish between
+	// fixed-line or mobile numbers, are not listed here, since we consider FIXED_LINE_OR_MOBILE to be
+	// a possibly geographically-related type anyway (like FIXED_LINE).
+	GEO_MOBILE_COUNTRIES = map[int32]bool{
+		52: true, // Mexico
+		54: true, // Argentina
+		55: true, // Brazil
+		62: true, // Indonesia: some prefixes only (fixed CMDA wireless)
+		86: true, // China
+	}
+
+	dataLoadMutex = sync.Mutex{}
 )
 
 // INTERNATIONAL and NATIONAL formats are consistent with the definition
@@ -605,12 +693,10 @@ var (
 	// default capacity of 16 (load factor=0.75) is fine.
 	countryCodesForNonGeographicalRegion = make(map[int]bool, 16)
 
-	// These are our onces and maps for our prefix to carrier maps
-	carrierOnces     = make(map[string]*sync.Once)
+	// These are maps for our prefix to carrier maps
 	carrierPrefixMap = make(map[string]*intStringMap)
 
-	// These are our onces and maps for our prefix to geocoding maps
-	geocodingOnces     = make(map[string]*sync.Once)
+	// These are maps for our prefix to geocoding maps
 	geocodingPrefixMap = make(map[string]*intStringMap)
 
 	// All the calling codes we support
@@ -675,10 +761,7 @@ func writeToCountryCodeToNonGeographicalMetadataMap(key int, v *PhoneMetadata) {
 	countryCodeToNonGeographicalMetadataMap[key] = v
 }
 
-func loadMetadataFromFile(
-	regionCode string,
-	countryCallingCode int) error {
-
+func loadMetadataFromFile() error {
 	metadataCollection, err := MetadataCollection()
 	if err != nil {
 		return err
@@ -713,7 +796,7 @@ func MetadataCollection() (*PhoneMetadataCollection, error) {
 		return currMetadataColl, nil
 	}
 
-	rawBytes, err := decodeUnzipString(gen.NumberData)
+	rawBytes, err := decodeUnzip(numberData)
 	if err != nil {
 		return nil, err
 	}
@@ -992,7 +1075,7 @@ func GetLengthOfNationalDestinationCode(number *PhoneNumber) int {
 		// from the rest of the phone number.
 		mobileToken := GetCountryMobileToken(int(number.GetCountryCode()))
 		if mobileToken != "" {
-			return len(numberGroups[1]) + len(numberGroups[2])
+			return len(numberGroups[2]) + len(numberGroups[3])
 		}
 	}
 	return len(numberGroups[2])
@@ -1065,10 +1148,9 @@ func formattingRuleHasFirstGroupOnly(nationalPrefixFormattingRule string) bool {
 // updated too.
 func isNumberGeographical(phoneNumber *PhoneNumber) bool {
 	numberType := GetNumberType(phoneNumber)
-	// TODO: Include mobile phone numbers from countries like Indonesia,
-	// which has some mobile numbers that are geographical.
 	return numberType == FIXED_LINE ||
-		numberType == FIXED_LINE_OR_MOBILE
+		numberType == FIXED_LINE_OR_MOBILE ||
+		(GEO_MOBILE_COUNTRIES[phoneNumber.GetCountryCode()] && numberType == MOBILE)
 }
 
 // Helper function to check region code is not unknown or null.
@@ -1304,11 +1386,11 @@ func FormatNumberForMobileDialing(
 				numberType == MOBILE ||
 				numberType == FIXED_LINE_OR_MOBILE
 		// Carrier codes may be needed in some countries. We handle this here.
-		if regionCode == "CO" && numberType == FIXED_LINE {
-			formattedNumber =
-				FormatNationalNumberWithCarrierCode(
-					numberNoExt, COLOMBIA_MOBILE_TO_FIXED_LINE_PREFIX)
-		} else if regionCode == "BR" && isFixedLineOrMobile {
+		if regionCode == "BR" && isFixedLineOrMobile {
+			// Historically, we set this to an empty string when parsing with
+			// raw input if none was found in the input string. However, this
+			// doesn't result in a number we can dial. For this reason, we
+			// treat the empty string the same as if it isn't set at all.
 			if numberNoExt.GetPreferredDomesticCarrierCode() != "" {
 				formattedNumber =
 					FormatNationalNumberWithPreferredCarrierCode(numberNoExt, "")
@@ -1319,16 +1401,6 @@ func FormatNumberForMobileDialing(
 				// Because of that, we return an empty string here.
 				formattedNumber = ""
 			}
-		} else if isValidNumber && regionCode == "HU" {
-			// The national format for HU numbers doesn't contain the
-			// national prefix, because that is how numbers are normally
-			// written down. However, the national prefix is obligatory when
-			// dialing from a mobile phone, except for short numbers. As a
-			// result, we add it back here
-			// if it is a valid regular length phone number.
-			formattedNumber =
-				GetNddPrefixForRegion(regionCode, true /* strip non-digits */) +
-					" " + Format(numberNoExt, NATIONAL)
 		} else if countryCallingCode == NANPA_COUNTRY_CODE {
 			// For NANPA countries, we output international format for
 			// numbers that can be dialed internationally, since that
@@ -1357,10 +1429,10 @@ func FormatNumberForMobileDialing(
 			// format, but don't have it when used for display. The reverse
 			// is true for mobile numbers. As a result, we output them in
 			// the international format to make it work.
-			if regionCode == REGION_CODE_FOR_NON_GEO_ENTITY ||
+			if (regionCode == REGION_CODE_FOR_NON_GEO_ENTITY ||
 				((regionCode == "MX" || regionCode == "CL" || regionCode == "UZ") &&
-					isFixedLineOrMobile) &&
-					canBeInternationallyDialled(numberNoExt) {
+					isFixedLineOrMobile)) &&
+				canBeInternationallyDialled(numberNoExt) {
 				formattedNumber = Format(numberNoExt, INTERNATIONAL)
 			} else {
 				formattedNumber = Format(numberNoExt, NATIONAL)
@@ -1436,10 +1508,10 @@ func FormatOutOfCountryCallingNumber(
 	// a preferred international prefix.
 	internationalPrefixForFormatting := ""
 	metPref := metadataForRegionCallingFrom.GetPreferredInternationalPrefix()
-	if UNIQUE_INTERNATIONAL_PREFIX.MatchString(internationalPrefix) {
-		internationalPrefixForFormatting = internationalPrefix
-	} else if metPref != "" {
+	if metPref != "" {
 		internationalPrefixForFormatting = metPref
+	} else if UNIQUE_INTERNATIONAL_PREFIX.MatchString(internationalPrefix) {
+		internationalPrefixForFormatting = internationalPrefix
 	}
 
 	regionCode := GetRegionCodeForCountryCode(countryCallingCode)
@@ -1474,7 +1546,7 @@ func FormatOutOfCountryCallingNumber(
 // modified as a result of formatting.
 func FormatInOriginalFormat(number *PhoneNumber, regionCallingFrom string) string {
 	rawInput := number.GetRawInput()
-	if len(rawInput) == 0 && !hasFormattingPatternForNumber(number) {
+	if len(rawInput) > 0 && !hasFormattingPatternForNumber(number) {
 		// We check if we have the formatting pattern because without that, we might format the number
 		// as a group without national prefix.
 		return rawInput
@@ -1705,6 +1777,8 @@ func FormatOutOfCountryKeepingAlphaChars(
 	regionCode := GetRegionCodeForCountryCode(countryCode)
 	// Metadata cannot be null because the country calling code is valid.
 	var metadataForRegion *PhoneMetadata = getMetadataForRegionOrCallingCode(countryCode, regionCode)
+	// Strip any extension from the raw input before appending the formatted extension.
+	maybeStripExtension(formattedNumber)
 	maybeAppendFormattedExtension(number, metadataForRegion,
 		INTERNATIONAL, formattedNumber)
 	if len(internationalPrefixForFormatting) > 0 {
@@ -1883,7 +1957,7 @@ func formatNsnUsingPatternWithCarrier(
 				}
 				return s
 			})
-		formattedNationalNumber = m.ReplaceAllString(numberFormatRule, nationalNumber)
+		formattedNationalNumber = m.ReplaceAllString(nationalNumber, numberFormatRule)
 	} else {
 		// Use the national prefix formatting rule instead.
 		nationalPrefixFormattingRule :=
@@ -2387,7 +2461,7 @@ func testNumberLength(number string, metadata *PhoneMetadata, numberType PhoneNu
 
 	actualLength := int32(len(number))
 
-	// This is safe because there is never an overlap beween the possible lengths and the local-only
+	// This is safe because there is never an overlap between the possible lengths and the local-only
 	// lengths; this is checked at build time.
 	for _, l := range localLengths {
 		if l == actualLength {
@@ -2712,10 +2786,10 @@ func maybeStripNationalPrefixAndCarrierCode(
 					number.String()[groups[1]:]) { // groups[1] == last match idx
 				return false
 			}
-			if len(carrierCode.Bytes()) != 0 &&
+			if carrierCode != nil &&
 				numOfGroups > 0 &&
-				groups[numOfGroups*2] > 0 { // Negative idx means subgroup did not match
-				carrierCode.Write(number.Bytes()[groups[numOfGroups*2]:groups[numOfGroups*2+1]])
+				groups[2] >= 0 && groups[3] >= 0 { // Ensure group(1) matched before slicing
+				carrierCode.Write(number.Bytes()[groups[2]:groups[3]]) // always extract group(1) as carrier code
 			}
 			number.ResetWith(number.Bytes()[groups[1]:])
 			return true
@@ -2729,7 +2803,7 @@ func maybeStripNationalPrefixAndCarrierCode(
 				!nationalNumberRule.Match(transformedNumBytes) {
 				return false
 			}
-			if len(carrierCode.Bytes()) != 0 && numOfGroups > 1 && groups[2] != -1 { // Check group(1) got a submatch
+			if carrierCode != nil && numOfGroups > 1 && groups[2] != -1 { // Check group(1) got a submatch
 				carrC := numString[groups[2]:groups[3]] // group(1) idxs
 				carrierCode.WriteString(carrC)
 			}
@@ -3004,7 +3078,7 @@ func parseHelper(
 		validationResult := testNumberLength(potentialNationalNumber.String(), regionMetadata, UNKNOWN)
 		if validationResult != TOO_SHORT && validationResult != IS_POSSIBLE_LOCAL_ONLY && validationResult != INVALID_LENGTH {
 			normalizedNationalNumber = potentialNationalNumber
-			if keepRawInput {
+			if keepRawInput && carrierCode.Len() > 0 {
 				phoneNumber.PreferredDomesticCarrierCode =
 					proto.String(carrierCode.String())
 			}
@@ -3318,66 +3392,14 @@ func IsMobileNumberPortableRegion(regionCode string) bool {
 	return metadata.GetMobileNumberPortableRegion()
 }
 
-func init() {
-	// load our regions
-	regionMap, err := loadIntStringArrayMap(gen.RegionData)
-	if err != nil {
-		panic(err)
-	}
-	countryCodeToRegion = regionMap.Map
-
-	// then our metadata
-	err = loadMetadataFromFile("US", 1)
-	if err != nil {
-		panic(err)
-	}
-
-	for eKey, regionCodes := range countryCodeToRegion {
-		// We can assume that if the county calling code maps to the
-		// non-geo entity region code then that's the only region code
-		// it maps to.
-		if len(regionCodes) == 1 && REGION_CODE_FOR_NON_GEO_ENTITY == regionCodes[0] {
-			// This is the subset of all country codes that map to the
-			// non-geo entity region code.
-			countryCodesForNonGeographicalRegion[eKey] = true
-		} else {
-			// The supported regions set does not include the "001"
-			// non-geo entity region code.
-			for _, val := range regionCodes {
-				supportedRegions[val] = true
-			}
-		}
-
-		supportedCallingCodes[eKey] = true
-	}
-	// If the non-geo entity still got added to the set of supported
-	// regions it must be because there are entries that list the non-geo
-	// entity alongside normal regions (which is wrong). If we discover
-	// this, remove the non-geo entity from the set of supported regions
-	// and log (or not log).
-	delete(supportedRegions, REGION_CODE_FOR_NON_GEO_ENTITY)
-
-	for _, val := range countryCodeToRegion[NANPA_COUNTRY_CODE] {
-		writeToNanpaRegions(val, struct{}{})
-	}
-
-	// Create our sync.Onces for each of our languages for carriers
-	for lang := range gen.CarrierData {
-		carrierOnces[lang] = &sync.Once{}
-	}
-	for lang := range gen.GeocodingData {
-		geocodingOnces[lang] = &sync.Once{}
-	}
-}
-
 // GetTimezonesForPrefix returns a slice of Timezones corresponding to the number passed
 // or error when it is impossible to convert the string to int
-// The algorythm tries to match the timezones starting from the maximum
+// The algorithm tries to match the timezones starting from the maximum
 // number of phone number digits and decreasing until it finds one or reaches 0
 func GetTimezonesForPrefix(number string) ([]string, error) {
 	var err error
 	timezoneOnce.Do(func() {
-		timezoneMap, err = loadIntStringArrayMap(gen.TimezoneData)
+		timezoneMap, err = loadIntArrayMap(timezoneData)
 	})
 
 	if timezoneMap == nil {
@@ -3387,10 +3409,7 @@ func GetTimezonesForPrefix(number string) ([]string, error) {
 	// strip any leading +
 	number = strings.TrimLeft(number, "+")
 
-	matchLength := len(number) // maxLength: min( len(number), timezoneMap.MaxLength )
-	if matchLength > timezoneMap.MaxLength {
-		matchLength = timezoneMap.MaxLength
-	}
+	matchLength := min(len(number), timezoneMap.MaxLength)
 
 	for i := matchLength; i > 0; i-- {
 		index, err := strconv.Atoi(number[0:i])
@@ -3412,25 +3431,39 @@ func GetTimezonesForNumber(number *PhoneNumber) ([]string, error) {
 	return GetTimezonesForPrefix(e164)
 }
 
-func getValueForNumber(onceMap map[string]*sync.Once, langMap map[string]*intStringMap, binMap map[string]string, language string, maxLength int, number *PhoneNumber) (string, int, error) {
-	// do we have data for this language
-	_, existing := binMap[language]
-	if !existing {
-		return "", 0, nil
+func lazyLoadPrefixes(langMap map[string]*intStringMap, dataFS embed.FS, dir, language string) (*intStringMap, error) {
+	dataLoadMutex.Lock()
+	defer dataLoadMutex.Unlock()
+
+	// if we already have prefixes (or nil if they don't exist) return that
+	prefixes, ok := langMap[language]
+	if ok {
+		return prefixes, nil
 	}
 
-	// load it into our map
-	onceMap[language].Do(func() {
-		prefixMap, err := loadPrefixMap(binMap[language])
-		if err == nil {
-			langMap[language] = prefixMap
-		}
-	})
+	// try to load the data file for this language
+	data, err := dataFS.ReadFile(dir + "/" + language + ".txt.gz")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 
-	// do we have a map for this language?
-	prefixMap, ok := langMap[language]
-	if !ok {
-		return "", 0, fmt.Errorf("error loading language map for %s", language)
+	if data != nil {
+		prefixes, err = loadPrefixMap(data)
+		if err != nil {
+			return nil, err
+		}
+		langMap[language] = prefixes
+	} else {
+		langMap[language] = nil // language doesn't have data
+	}
+
+	return langMap[language], nil
+}
+
+func getValueForNumber(langMap map[string]*intStringMap, dataFS embed.FS, dir, language string, maxLength int, number *PhoneNumber) (string, int, error) {
+	prefixes, err := lazyLoadPrefixes(langMap, dataFS, dir, language)
+	if err != nil || prefixes == nil {
+		return "", 0, err
 	}
 
 	e164 := Format(number, E164)
@@ -3444,7 +3477,7 @@ func getValueForNumber(onceMap map[string]*sync.Once, langMap map[string]*intStr
 		if err != nil {
 			return "", 0, err
 		}
-		if value, has := prefixMap.Map[index]; has {
+		if value, has := prefixes.Map[index]; has {
 			return value, index, nil
 		}
 	}
@@ -3472,7 +3505,7 @@ func GetSafeCarrierDisplayNameForNumber(phoneNumber *PhoneNumber, lang string) (
 // GetCarrierWithPrefixForNumber returns the carrier we believe the number belongs to, as well as
 // its prefix. Note due to number porting this is only a guess, there is no guarantee to its accuracy.
 func GetCarrierWithPrefixForNumber(number *PhoneNumber, lang string) (string, int, error) {
-	carrier, prefix, err := getValueForNumber(carrierOnces, carrierPrefixMap, gen.CarrierData, lang, 10, number)
+	carrier, prefix, err := getValueForNumber(carrierPrefixMap, carrierData, carrierDataPath, lang, 10, number)
 	if err != nil {
 		return "", 0, err
 	}
@@ -3481,19 +3514,19 @@ func GetCarrierWithPrefixForNumber(number *PhoneNumber, lang string) (string, in
 	}
 
 	// fallback to english
-	return getValueForNumber(carrierOnces, carrierPrefixMap, gen.CarrierData, "en", 10, number)
+	return getValueForNumber(carrierPrefixMap, carrierData, carrierDataPath, "en", 10, number)
 }
 
 // GetGeocodingForNumber returns the location we think the number was first acquired in. This is
 // just our best guess, there is no guarantee to its accuracy.
 func GetGeocodingForNumber(number *PhoneNumber, lang string) (string, error) {
-	geocoding, _, err := getValueForNumber(geocodingOnces, geocodingPrefixMap, gen.GeocodingData, lang, 10, number)
+	geocoding, _, err := getValueForNumber(geocodingPrefixMap, geocodingData, geocodingDataPath, lang, 10, number)
 	if err != nil || geocoding != "" {
 		return geocoding, err
 	}
 
 	// fallback to english
-	geocoding, _, err = getValueForNumber(geocodingOnces, geocodingPrefixMap, gen.GeocodingData, "en", 10, number)
+	geocoding, _, err = getValueForNumber(geocodingPrefixMap, geocodingData, geocodingDataPath, "en", 10, number)
 	if err != nil || geocoding != "" {
 		return geocoding, err
 	}

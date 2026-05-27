@@ -3,6 +3,7 @@ package phonenumbers
 import (
 	"reflect"
 	"regexp"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,7 +122,7 @@ func TestExtractPossibleNumber(t *testing.T) {
 	assert.Equal(t, "530) 583-6985 x302", extractPossibleNumber("(530) 583-6985 x302/x2303")) // yes, the leading '(' is missing
 }
 
-func TestIsViablePhoneNumer(t *testing.T) {
+func TestIsViablePhoneNumber(t *testing.T) {
 	var tests = []struct {
 		input    string
 		isViable bool
@@ -215,6 +216,7 @@ func TestIsValidNumber(t *testing.T) {
 		{input: "712276797", region: "RO", err: nil, isValid: true},
 		{input: "8409990936", region: "US", err: nil, isValid: true},
 		{input: "03260000000", region: "PK", err: nil, isValid: true},
+		{input: "+85247431471", region: "HK", err: nil, isValid: true},
 	}
 
 	for _, tc := range tests {
@@ -782,7 +784,7 @@ func TestGetMetadata(t *testing.T) {
 			cc:         49,
 			i18nPref:   "00",
 			natPref:    "0",
-			numFmtSize: 18,
+			numFmtSize: 19,
 		}, {
 			name:       "AR",
 			id:         "AR",
@@ -851,12 +853,12 @@ func TestIsNumberMatch(t *testing.T) {
 }
 
 func TestIsNumberGeographical(t *testing.T) {
-	if !isNumberGeographical(getTestNumber("AU_NUMBER")) {
-		t.Error("Australia should be a geographical number")
-	}
-	if isNumberGeographical(getTestNumber("INTERNATIONAL_TOLL_FREE")) {
-		t.Error("An international toll free number should not be geographical")
-	}
+	assert.True(t, isNumberGeographical(getTestNumber("AU_NUMBER")), "Australia should be geographical")
+	assert.False(t, isNumberGeographical(getTestNumber("INTERNATIONAL_TOLL_FREE")), "international toll free should not be geographical")
+
+	// Chinese mobile numbers are geo-mobile (geographically assigned) but not via distinct mobile area codes
+	cnMobile := newPhoneNumber(86, 18912341234)
+	assert.True(t, isNumberGeographical(cnMobile), "Chinese mobile numbers should be geographical")
 }
 
 func TestGetLengthOfGeographicalAreaCode(t *testing.T) {
@@ -884,12 +886,12 @@ func TestGetLengthOfGeographicalAreaCode(t *testing.T) {
 }
 
 func TestGetCountryMobileToken(t *testing.T) {
-	if GetCountryMobileToken(GetCountryCodeForRegion("MX")) != "1" {
-		t.Error("Mexico should have a mobile token == \"1\"")
-	}
-	if GetCountryMobileToken(GetCountryCodeForRegion("SE")) != "" {
-		t.Error("Sweden should have a mobile token")
-	}
+	// Argentina has mobile token "9"
+	assert.Equal(t, "9", GetCountryMobileToken(GetCountryCodeForRegion("AR")))
+	// Mexico no longer uses a mobile token
+	assert.Equal(t, "", GetCountryMobileToken(GetCountryCodeForRegion("MX")))
+	// Sweden has no mobile token
+	assert.Equal(t, "", GetCountryMobileToken(GetCountryCodeForRegion("SE")))
 }
 
 func TestGetNationalSignificantNumber(t *testing.T) {
@@ -960,9 +962,8 @@ func TestNormalizeDigitsOnly(t *testing.T) {
 }
 
 func TestNormalizeDiallableCharsOnly(t *testing.T) {
-	if normalizeDiallableCharsOnly("03*4-56&+a#234") != "03*456+234" {
-		t.Error("did not correctly remove non-diallable characters")
-	}
+	// '#' is a diallable character and should be preserved
+	assert.Equal(t, "03*456+#234", normalizeDiallableCharsOnly("03*4-56&+a#234"))
 }
 
 type testCase struct {
@@ -1377,6 +1378,7 @@ func TestGetCarrierWithPrefixForNumber(t *testing.T) {
 		{num: "+917999999543", lang: "en", expectedCarrier: "Reliance Jio", expectedPrefix: 917999},
 		{num: "+593992218722", lang: "en", expectedCarrier: "Claro", expectedPrefix: 5939922},
 		{num: "+201987654321", lang: "en", expectedCarrier: "", expectedPrefix: 0},
+		{num: "+201987654321", lang: "notFound", expectedCarrier: "", expectedPrefix: 0},
 	}
 	for _, test := range tests {
 		number, err := Parse(test.num, "ZZ")
@@ -1396,6 +1398,25 @@ func TestGetCarrierWithPrefixForNumber(t *testing.T) {
 	}
 }
 
+func TestGetCarrierWithPrefixForNumberWithConcurrency(t *testing.T) {
+	number, _ := Parse("+8613702032331", "ZZ")
+
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := GetCarrierWithPrefixForNumber(number, "en")
+			if err != nil {
+				t.Errorf("Failed to getCarrierWithPrefix for the number %s: %s", "+8613702032331", err)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
 func TestGetGeocodingForNumber(t *testing.T) {
 	tests := []struct {
 		num      string
@@ -1406,7 +1427,7 @@ func TestGetGeocodingForNumber(t *testing.T) {
 		{num: "+8613702032331", lang: "zh", expected: "天津市"},
 		{num: "+863197785050", lang: "zh", expected: "河北省邢台市"},
 		{num: "+8613323241342", lang: "en", expected: "Baoding, Hebei"},
-		{num: "+917999999543", lang: "en", expected: "Ahmedabad Local, Gujarat"},
+		{num: "+917999499543", lang: "en", expected: "Ahmedabad Local, Gujarat"},
 		{num: "+17047181840", lang: "en", expected: "North Carolina"},
 		{num: "+12542462158", lang: "en", expected: "Texas"},
 		{num: "+16193165996", lang: "en", expected: "California"},
@@ -1454,6 +1475,89 @@ func TestMaybeStripExtension(t *testing.T) {
 			number:    1234576,
 			extension: "123",
 			region:    "US",
+		},
+		// Russian extension label "доб"
+		{
+			input:     "8 (423) 202-25-11, \u0434\u043E\u0431. 100",
+			number:    4232022511,
+			extension: "100",
+			region:    "RU",
+		},
+		{
+			input:     "8 (423) 202-25-11 \u0434\u043E\u0431 100",
+			number:    4232022511,
+			extension: "100",
+			region:    "RU",
+		},
+		// Russian extension label uppercase "ДОБ"
+		{
+			input:     "8 (423) 202-25-11, \u0414\u041E\u0411. 100",
+			number:    4232022511,
+			extension: "100",
+			region:    "RU",
+		},
+		// Auto-dialling with ",,"
+		{
+			input:     "+12679000000,,123456789012345#",
+			number:    2679000000,
+			extension: "123456789012345",
+			region:    "US",
+		},
+		// Auto-dialling with ";"
+		{
+			input:     "+12679000000;123456789012345#",
+			number:    2679000000,
+			extension: "123456789012345",
+			region:    "US",
+		},
+		// Single comma extension
+		{
+			input:     "+442034000000,123456789#",
+			number:    2034000000,
+			extension: "123456789",
+			region:    "GB",
+		},
+		// Explicit label with up to 20 digits
+		{
+			input:     "03 3316005 xtn:12345678901234567890",
+			number:    33316005,
+			extension: "12345678901234567890",
+			region:    "NZ",
+		},
+		// RFC3966 with up to 20 digits
+		{
+			input:     "tel:+6433316005;ext=01234567890123456789",
+			number:    33316005,
+			extension: "01234567890123456789",
+			region:    "NZ",
+		},
+		// Ambiguous char with up to 9 digits
+		{
+			input:     "03 3316005 x 123456789",
+			number:    33316005,
+			extension: "123456789",
+			region:    "NZ",
+		},
+		// Trailing # with up to 6 digits
+		{
+			input:     "+11234567890 666666#",
+			number:    1234567890,
+			extension: "666666",
+			region:    "US",
+		},
+		// extensión with accented o
+		{
+			input:     "(800) 901-3355 ,extensi\u00F3n 7246433",
+			number:    8009013355,
+			extension: "7246433",
+			region:    "US",
+		},
+		// Full-width extension "ｅｘｔｎ"
+		{
+			input:     "+442034567890\uFF45\uFF58\uFF54\uFF4E456",
+			number:    2034567890,
+			extension: "456",
+			region:    "GB",
 		},
 	}
 
@@ -1707,6 +1811,221 @@ func TestGetSafeCarrierDisplayNameForNumber(t *testing.T) {
 	}
 }
 
+// Tests ported from upstream Java PhoneNumberUtilTest to verify parity with libphonenumber.
+
+func TestFormatWithCarrierCode(t *testing.T) {
+	// Test carrier code formatting using BR (Brazil) which uses carrier codes in production metadata
+	brNumber := newPhoneNumber(55, 1155256325)
+
+	assert.Equal(t, "(11) 5525-6325", Format(brNumber, NATIONAL))
+	assert.Equal(t, "0 12 (11) 5525-6325", FormatNationalNumberWithCarrierCode(brNumber, "12"))
+	assert.Equal(t, "0 15 (11) 5525-6325", FormatNationalNumberWithCarrierCode(brNumber, "15"))
+	assert.Equal(t, "(11) 5525-6325", FormatNationalNumberWithCarrierCode(brNumber, ""))
+	assert.Equal(t, "+551155256325", Format(brNumber, E164))
+
+	// US doesn't use carrier codes so there should be no change
+	assert.Equal(t, "(650) 253-0000", FormatNationalNumberWithCarrierCode(getTestNumber("US_NUMBER"), "15"))
+
+	// Invalid country code should just get the NSN
+	assert.Equal(t, "12345", FormatNationalNumberWithCarrierCode(getTestNumber("UNKNOWN_COUNTRY_CODE_NO_RAW_INPUT"), "89"))
+}
+
+func TestFormatWithPreferredCarrierCode(t *testing.T) {
+	// Test preferred carrier code using BR (Brazil) which uses carrier codes in production metadata
+	brNumber := newPhoneNumber(55, 1155256325)
+
+	// No preferred carrier code set - use fallback
+	assert.Equal(t, "0 15 (11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, "15"))
+	assert.Equal(t, "(11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, ""))
+
+	// Preferred carrier code set
+	brNumber.PreferredDomesticCarrierCode = proto.String("19")
+	assert.Equal(t, "(11) 5525-6325", Format(brNumber, NATIONAL))
+	assert.Equal(t, "0 19 (11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, "15"))
+	assert.Equal(t, "0 19 (11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, ""))
+
+	// When preferred_domestic_carrier_code is a space, use it
+	brNumber.PreferredDomesticCarrierCode = proto.String(" ")
+	assert.Equal(t, "0   (11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, "15"))
+
+	// When preferred_domestic_carrier_code is empty, use fallback
+	brNumber.PreferredDomesticCarrierCode = proto.String("")
+	assert.Equal(t, "0 15 (11) 5525-6325", FormatNationalNumberWithPreferredCarrierCode(brNumber, "15"))
+
+	// US doesn't use carrier codes so there should be no change
+	usNumber := newPhoneNumber(1, 4241231234)
+	usNumber.PreferredDomesticCarrierCode = proto.String("99")
+	assert.Equal(t, "(424) 123-1234", Format(usNumber, NATIONAL))
+	assert.Equal(t, "(424) 123-1234", FormatNationalNumberWithPreferredCarrierCode(usNumber, "15"))
+}
+
+func TestGetLengthOfNDC(t *testing.T) {
+	// Ported from PhoneNumberUtilTest.testGetLengthOfNationalDestinationCode
+	assert.Equal(t, 3, GetLengthOfNationalDestinationCode(getTestNumber("US_NUMBER")))
+	assert.Equal(t, 3, GetLengthOfNationalDestinationCode(getTestNumber("US_TOLLFREE")))
+	assert.Equal(t, 2, GetLengthOfNationalDestinationCode(getTestNumber("GB_NUMBER")))
+	assert.Equal(t, 4, GetLengthOfNationalDestinationCode(getTestNumber("GB_MOBILE")))
+	assert.Equal(t, 2, GetLengthOfNationalDestinationCode(getTestNumber("AR_NUMBER")))
+	assert.Equal(t, 3, GetLengthOfNationalDestinationCode(getTestNumber("AR_MOBILE")))
+	assert.Equal(t, 1, GetLengthOfNationalDestinationCode(getTestNumber("AU_NUMBER")))
+	assert.Equal(t, 4, GetLengthOfNationalDestinationCode(getTestNumber("SG_NUMBER")))
+	assert.Equal(t, 0, GetLengthOfNationalDestinationCode(getTestNumber("US_SHORT_BY_ONE_NUMBER")))
+	assert.Equal(t, 4, GetLengthOfNationalDestinationCode(getTestNumber("INTERNATIONAL_TOLL_FREE")))
+
+	// A number containing an invalid country calling code
+	invalidCC := &PhoneNumber{}
+	invalidCC.CountryCode = proto.Int32(123)
+	invalidCC.NationalNumber = proto.Uint64(6502530000)
+	assert.Equal(t, 0, GetLengthOfNationalDestinationCode(invalidCC))
+}
+
+func TestFormatOutOfCountryKeepingAlphaCharsWithExtension(t *testing.T) {
+	// Test that extension text in raw input is stripped before appending formatted extension.
+	// Uses DE as calling region (simple international prefix "00") to avoid the separate
+	// UNIQUE_INTERNATIONAL_PREFIX matching issue with complex prefix patterns like AU's.
+	alphaNumericNumberWithExtn, err := ParseAndKeepRawInput("800 SIX-flag ext. 1234", "US")
+	assert.NoError(t, err)
+	// The extension should appear only once, not duplicated from raw input + formatted extension
+	assert.Equal(t, "00 1 800 SIX-FLAG ext. 1234",
+		FormatOutOfCountryKeepingAlphaChars(alphaNumericNumberWithExtn, "DE"))
+}
+
+func TestFormatNumberForMobileDialingUpstream(t *testing.T) {
+	// Colombia fixed line - no longer has special mobile-to-fixed prefix
+	coFixedLine := newPhoneNumber(57, 6012345678)
+	assert.Equal(t, "6012345678", FormatNumberForMobileDialing(coFixedLine, "CO", false))
+
+	deNumber := getTestNumber("DE_NUMBER")
+	assert.Equal(t, "030123456", FormatNumberForMobileDialing(deNumber, "DE", false))
+	assert.Equal(t, "+4930123456", FormatNumberForMobileDialing(deNumber, "CH", false))
+
+	// Extension should be stripped for mobile dialing
+	deNumberWithExtn := &PhoneNumber{}
+	proto.Merge(deNumberWithExtn, deNumber)
+	deNumberWithExtn.Extension = proto.String("1234")
+	assert.Equal(t, "030123456", FormatNumberForMobileDialing(deNumberWithExtn, "DE", false))
+	assert.Equal(t, "+4930123456", FormatNumberForMobileDialing(deNumberWithExtn, "CH", false))
+
+	// Non-geographical numbers should always be dialed in international format
+	intlTollFree := getTestNumber("INTERNATIONAL_TOLL_FREE")
+	assert.Equal(t, "+80012345678", FormatNumberForMobileDialing(intlTollFree, "US", false))
+	assert.Equal(t, "+80012345678", FormatNumberForMobileDialing(intlTollFree, "001", false))
+	assert.Equal(t, "+80012345678", FormatNumberForMobileDialing(intlTollFree, "JP", false))
+	assert.Equal(t, "+800 1234 5678", FormatNumberForMobileDialing(intlTollFree, "JP", true))
+
+	// Mexico - fixed line and mobile in international format
+	assert.Equal(t, "+523312345678", FormatNumberForMobileDialing(getTestNumber("MX_NUMBER1"), "MX", false))
+	assert.Equal(t, "+523312345678", FormatNumberForMobileDialing(getTestNumber("MX_NUMBER1"), "US", false))
+
+	// Uzbekistan - should be international format
+	uzFixed := newPhoneNumber(998, 612201234)
+	uzMobile := newPhoneNumber(998, 950123456)
+	assert.Equal(t, "+998612201234", FormatNumberForMobileDialing(uzFixed, "UZ", false))
+	assert.Equal(t, "+998950123456", FormatNumberForMobileDialing(uzMobile, "UZ", false))
+	assert.Equal(t, "+998950123456", FormatNumberForMobileDialing(uzMobile, "US", false))
+
+	// NANPA - regular length in international format
+	assert.Equal(t, "+16502530000", FormatNumberForMobileDialing(getTestNumber("US_NUMBER"), "US", false))
+	assert.Equal(t, "+16502530000", FormatNumberForMobileDialing(getTestNumber("US_NUMBER"), "CA", false))
+	assert.Equal(t, "+16502530000", FormatNumberForMobileDialing(getTestNumber("US_NUMBER"), "BR", false))
+
+	// Short numbers in national format
+	usShort := newPhoneNumber(1, 911)
+	assert.Equal(t, "911", FormatNumberForMobileDialing(usShort, "US", false))
+	assert.Equal(t, "", FormatNumberForMobileDialing(usShort, "CA", false))
+	assert.Equal(t, "", FormatNumberForMobileDialing(usShort, "BR", false))
+}
+
+func TestFormattingRuleHasFirstGroupOnly(t *testing.T) {
+	// Verify the fix: formattingRuleHasFirstGroupOnly should do a full match
+	assert.True(t, formattingRuleHasFirstGroupOnly("$1"))
+	assert.True(t, formattingRuleHasFirstGroupOnly("($1)"))
+	assert.True(t, formattingRuleHasFirstGroupOnly(""))
+	assert.False(t, formattingRuleHasFirstGroupOnly("0$1"))
+	assert.False(t, formattingRuleHasFirstGroupOnly("0($1)"))
+	assert.False(t, formattingRuleHasFirstGroupOnly("$1 suffix"))
+}
+
+func TestMaybeStripNationalPrefixAndCarrierCode(t *testing.T) {
+	// Ported from PhoneNumberUtilTest.testMaybeStripNationalPrefix
+
+	// Test basic national prefix stripping
+	metadata := &PhoneMetadata{}
+	metadata.NationalPrefixForParsing = proto.String("34")
+	metadata.GeneralDesc = &PhoneNumberDesc{NationalNumberPattern: proto.String("\\d{4,8}")}
+
+	number := NewBuilder([]byte("34356778"))
+	assert.True(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, nil))
+	assert.Equal(t, "356778", number.String())
+
+	// Retry - should not strip again
+	assert.False(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, nil))
+	assert.Equal(t, "356778", number.String())
+
+	// No national prefix
+	metadata.NationalPrefixForParsing = proto.String("")
+	number = NewBuilder([]byte("356778"))
+	assert.False(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, nil))
+	assert.Equal(t, "356778", number.String())
+
+	// If stripping doesn't match national rule, don't strip
+	metadata.NationalPrefixForParsing = proto.String("3")
+	number = NewBuilder([]byte("3123"))
+	assert.False(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, nil))
+	assert.Equal(t, "3123", number.String())
+
+	// Test extracting carrier code
+	metadata.NationalPrefixForParsing = proto.String("0(81)?")
+	number = NewBuilder([]byte("08122123456"))
+	carrierCode := NewBuilder(nil)
+	assert.True(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, carrierCode))
+	assert.Equal(t, "81", carrierCode.String())
+	assert.Equal(t, "22123456", number.String())
+
+	// Test with transform rule
+	metadata.NationalPrefixTransformRule = proto.String("5${1}5")
+	metadata.NationalPrefixForParsing = proto.String("0(\\d{2})")
+	number = NewBuilder([]byte("031123"))
+	assert.True(t, maybeStripNationalPrefixAndCarrierCode(number, metadata, nil))
+	assert.Equal(t, "5315123", number.String())
+}
+
+func TestParseAndKeepRawWithCarrierCode(t *testing.T) {
+	// Ported from PhoneNumberUtilTest.testParseAndKeepRaw - Korean number with carrier code
+	koreanNumber, err := ParseAndKeepRawInput("08122123456", "KR")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(82), koreanNumber.GetCountryCode())
+	assert.Equal(t, uint64(22123456), koreanNumber.GetNationalNumber())
+	assert.Equal(t, "08122123456", koreanNumber.GetRawInput())
+	assert.Equal(t, "81", koreanNumber.GetPreferredDomesticCarrierCode())
+}
+
+func TestParseAndKeepRawDoesNotSetEmptyCarrierCode(t *testing.T) {
+	// Verify that PreferredDomesticCarrierCode is not set to empty string
+	// when there is no carrier code
+	usNumber, err := ParseAndKeepRawInput("+16502530000", "US")
+	assert.NoError(t, err)
+	assert.Equal(t, "", usNumber.GetPreferredDomesticCarrierCode())
+	assert.Nil(t, usNumber.PreferredDomesticCarrierCode, "should not be set when no carrier code")
+}
+
 func s(str string) *string {
 	return &str
+}
+
+func BenchmarkLoadMetadata(b *testing.B) {
+	for i := 0; i <= b.N; i++ {
+		initMetadata()
+	}
+}
+
+func BenchmarkGetCarrierWithPrefixForNumber(b *testing.B) {
+	number, _ := Parse("+8613702032331", "ZZ")
+
+	for n := 0; n < b.N; n++ {
+		_, _, err := GetCarrierWithPrefixForNumber(number, "en")
+		if err != nil {
+			b.Errorf("Failed to getCarrierWithPrefix for the number %s: %s", "+8613702032331", err)
+		}
+	}
 }

@@ -1,12 +1,11 @@
 module github.com/Accompany-Health/phonenumbers
 
-go 1.23
+go 1.23.0
 
 require (
-	github.com/stretchr/testify v1.9.0
-	golang.org/x/exp v0.0.0-20240525044651-4c93da0ed11d
-	golang.org/x/text v0.15.0
-	google.golang.org/protobuf v1.34.1
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/text v0.23.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
