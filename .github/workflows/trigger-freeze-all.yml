@@ -1,0 +1,21 @@
+name: Administrative - Freeze All Open PRs
+on:
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  comment-all-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on all open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Finding all open pull requests targeting main..."
+          gh pr list --state open --base "main" --json number --jq '.[].number' | while read -r pr_number; do
+            echo "Locking PR #${pr_number}..."
+            gh pr comment "$pr_number" --body "⚠️ Admin Action: Checking repository freeze status."
+          done
+          echo "Done! All open PRs have been commented on."

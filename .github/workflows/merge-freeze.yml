@@ -1,0 +1,48 @@
+name: Emergency Merge Freeze
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  issue_comment:
+    types: [created]
+
+permissions:
+  checks: write
+  pull-requests: read
+
+jobs:
+  freeze-check:
+    name: Freeze Check
+    if: github.event_name == 'pull_request' || github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            sha="${{ github.event.pull_request.head.sha }}"
+          else
+            sha=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefOid --jq .headRefOid)
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Report freeze status as a check run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ vars.REPO_FROZEN }}" = "true" ]; then
+            conclusion="failure"
+            summary="REPO_FROZEN is set to true. Merging is disabled."
+          else
+            conclusion="success"
+            summary="Repository is open."
+          fi
+          gh api --method POST "/repos/${{ github.repository }}/check-runs" \
+            -f name="Freeze Check" \
+            -f head_sha="${{ steps.pr.outputs.sha }}" \
+            -f status="completed" \
+            -f conclusion="$conclusion" \
+            -f "output[title]=Emergency Merge Freeze" \
+            -f "output[summary]=$summary"
