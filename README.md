@@ -67,7 +67,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for common problems inclu
 ## Ownership
 
 - **Team:** ninjas
-- **Slack:** #eng-backend <!-- TODO: confirm actual Slack channel for ninjas -->
+- **Slack:** #eng-ninjas
 - **CODEOWNERS:** `@Accompany-Health/ninjas`
 
 ---

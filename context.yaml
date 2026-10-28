@@ -4,7 +4,7 @@ language:
   - go
 owner:
   team: "ninjas"
-  slack: "#eng-backend"  # TODO: confirm actual Slack channel for ninjas
+  slack: "#eng-ninjas"
   github: "@Accompany-Health/ninjas"
 tier: "tier2"
 lifecycle: production
